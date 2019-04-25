@@ -69,13 +69,16 @@
 //! [maplit]: https://crates.io/crates/maplit
 
 mod unresolved_value;
+mod brick_color;
 mod id;
 mod instance;
 mod tree;
 mod value;
+mod value_conversion;
 
 pub use crate::{
     unresolved_value::{AmbiguousRbxValue, UnresolvedRbxValue},
+    brick_color::BrickColor,
     id::RbxId,
     instance::{RbxInstanceProperties, RbxInstance},
     tree::{RbxTree, Descendants},

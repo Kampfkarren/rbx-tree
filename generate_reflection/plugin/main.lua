@@ -1,5 +1,14 @@
 local HttpService = game:GetService("HttpService")
 
+local VERBOSE = false
+local ERROR_AT_END = false
+
+local function vwarn(message)
+	if VERBOSE then
+		vwarn(message)
+	end
+end
+
 --[[
 	Little function for use with pcall to avoid making so many closures.
 ]]
@@ -17,17 +26,13 @@ local function getClientVersion()
 	return {major, minor, patch, build}
 end
 
-local blacklistedProperties = {
-	-- Deprecated variants
-	className = true, -- on Instance
-	archivable = true, -- on Instance
-	cframe = true, -- on Body*
-	focus = true, -- on Camera
-	CoordinateFrame = true, -- on Camera
-	formFactor = true, -- on FormFactorPart
+local propertyBlacklist = {
+	-- Mistakes
 	RequestQueueSize = true, -- on ContentProvider, mistakenly marked serializable
 
 	-- Stuff that doesn't have meaningful defaults
+	ClassName = true,
+	Archivable = true,
 	Parent = true,
 	DataCost = true,
 	RobloxLocked = true,
@@ -38,20 +43,16 @@ local classNameBlacklist = {
 	NetworkClient = true,
 }
 
-local function shouldMeasureProperty(member)
-	if member.MemberType ~= "Property" then
+local function shouldMeasureProperty(propertyName, property)
+	if propertyBlacklist[propertyName] then
 		return false
 	end
 
-	if blacklistedProperties[member.Name] then
+	if property.tags.ReadOnly then
 		return false
 	end
 
-	if not member.Serialization.CanLoad and not member.Serialization.CanSave then
-		return false
-	end
-
-	return true
+	return property.isCanonical
 end
 
 --[[
@@ -65,14 +66,12 @@ local function getDefaultInstance(className)
 
 	-- Can we construct one of these from Lua?
 	local ok, created = pcall(Instance.new, className)
-
 	if ok then
 		return created
 	end
 
-	-- Guess not, is it a service, maybe?
+	-- Guess not, is it a service?
 	local ok, service = pcall(game.GetService, game, className)
-
 	if ok then
 		return service
 	end
@@ -81,8 +80,10 @@ local function getDefaultInstance(className)
 end
 
 local function serializeFloat(value)
+	-- TODO: Figure out a better way to serialize infinity and NaN, neither of
+	-- which fit into JSON.
 	if value == math.huge or value == -math.huge then
-		warn("Can't serialize infinity or negative infinity yet!")
+		vwarn("Can't serialize infinity or negative infinity yet!")
 		return 999999999 * math.sign(value)
 	end
 
@@ -105,7 +106,7 @@ local typeConverters = {
 		return { Type = "Ref", Value = nil }
 	end,
 	Instance = function(_value)
-		warn("Not sure how to serialize non-nil default Instance property")
+		vwarn("Not sure how to serialize non-nil default Instance property")
 		return { Type = "Ref", Value = nil }
 	end,
 	Vector3 = function(value)
@@ -180,54 +181,53 @@ return function(postMessage)
 		version = getClientVersion(),
 	}))
 
-	local dump = HttpService:JSONDecode(script.Parent.ApiDump.Value)
+	local ReflectionDatabase = {
+		classes = require(script.Parent.ReflectionClasses),
+	}
 
-	local classesByName = {}
-	for _, class in ipairs(dump.Classes) do
-		classesByName[class.Name] = class
-	end
-
-	for _, class in ipairs(dump.Classes) do
-		local instance = getDefaultInstance(class.Name)
+	for className, class in pairs(ReflectionDatabase.classes) do
+		local instance = getDefaultInstance(className)
 
 		if instance == nil then
-			warn("Couldn't find a default enough version of instance", class.Name)
+			vwarn("Couldn't find a default enough version of instance", class.Name)
 		else
 			local defaultProperties = {}
 
 			local currentClass = class
 
 			while currentClass ~= nil do
-				for _, member in ipairs(currentClass.Members) do
-					if shouldMeasureProperty(member) then
-						local ok, value = pcall(get, instance, member.Name)
+				for propertyName, property in pairs(currentClass.properties) do
+					if shouldMeasureProperty(propertyName, property) then
+						local ok, value = pcall(get, instance, propertyName)
 
 						if ok then
 							local ok, rojoValue = robloxValueToRojoValue(value)
 
 							if ok then
-								defaultProperties[member.Name] = rojoValue
+								defaultProperties[propertyName] = rojoValue
 							else
-								warn("Couldn't convert property", member.Name, "on class", class.Name, "to a Rojo value")
+								vwarn("Couldn't convert property", propertyName, "on class", class.Name, "to a Rojo value")
 							end
 						else
-							warn("Couldn't read property", member.Name, "on class", class.Name)
+							vwarn("Couldn't read property", propertyName, "on class", class.Name)
 						end
 					end
 				end
 
-				currentClass = classesByName[currentClass.Superclass]
+				currentClass = ReflectionDatabase.classes[currentClass.superclass]
 			end
 
 			if next(defaultProperties) ~= nil then
 				postMessage(HttpService:JSONEncode({
 					type = "DefaultProperties",
-					className = class.Name,
+					className = className,
 					properties = defaultProperties,
 				}))
 			end
 		end
 	end
 
-	-- error("hold on")
+	if ERROR_AT_END then
+		error("Breaking here.")
+	end
 end
